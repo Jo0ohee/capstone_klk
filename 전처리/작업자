@@ -1,1 +1,299 @@
+import sys
+import pymysql
+import pandas as pd
+from datetime import timedelta
 
+# 명령줄 인수로부터 시작 날짜와 종료 날짜를 가져옴
+if len(sys.argv) != 3:
+    print("Usage: python date_operator_db.py <start_date> <end_date>")
+    sys.exit(1)
+
+# 시작 날짜와 종료 날짜를 설정
+date1 = pd.to_datetime(sys.argv[1])
+date2 = pd.to_datetime(sys.argv[2])
+
+# date2에 끝 시간을 추가
+date2 = date2 + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+# 입력받은 날짜 출력
+print(f"Start Date: {date1}")
+print(f"End Date: {date2}")
+
+# MySQL 데이터베이스 연결
+conn = pymysql.connect(
+    host='localhost',
+    user='root',
+    password='1234',
+    db='smartfactorydb',
+    charset='utf8'
+)
+
+# eventTBL, operatorTBL 데이터 불러오기
+query = "SELECT * FROM eventTBL"
+data_sql = pd.read_sql(query, conn)
+
+query1 = "SELECT OPERATOR_ID FROM operatorTBL"
+operator_ids_sql = pd.read_sql(query1, conn)
+
+# # 날짜 입력
+# date1 = pd.to_datetime("2024-11-05")
+# date2 = pd.to_datetime("2024-11-07")
+
+# # date2에 끝 시간을 추가
+# date2 = date2 + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+data = data_sql[(data_sql['TIME'] >= date1) & (data_sql['TIME'] <= date2)]
+operator_ids = operator_ids_sql['OPERATOR_ID'].tolist()
+
+# 데이터의 TIME 컬럼을 datetime 형식으로 변환
+data['TIME'] = pd.to_datetime(data['TIME'])
+
+# STANDARD_TIME 매핑 딕셔너리 생성
+standard_time_map = {
+    ("ASM02", "BP60010"): 30,
+    ("ASM02", "BP60011"): 35,
+    ("ASM02", "BP60012"): 32,
+    ("BLW01", "BP60010"): 20,
+    ("BLW01", "BP60011"): 25,
+    ("BLW01", "BP60012"): 22,
+    ("PNT03", "BP60010"): 35,
+    ("PNT03", "BP60011"): 33,
+    ("PNT03", "BP60012"): 36,
+}
+
+# 표준 ST 값을 딕셔너리로 정의
+standard_st = {
+    'BLW01': 67,
+    'ASM02': 97,
+    'PNT03': 104
+}
+
+# 결과를 저장할 딕셔너리
+results = {operator_id: {
+    'total_working_time' : 0,
+    'productive_time' : 0,
+    'input' : 0,
+    'fail' : 0,
+    'performance' : 0,
+    'efficiency' : 0
+} for operator_id in operator_ids}
+
+# 각 operator_id에 대해 작업 공수 계산
+def calculate_total_working_time_for_operators(data, operator_ids, results):
+    # 각 작업자별 출근일과 총 초 단위 시간 계산
+    for operator_id in operator_ids:
+        filtered_df = data[data['ID'] == operator_id].copy()
+        filtered_df['DATE'] = filtered_df['TIME'].dt.date  # 날짜만 추출
+        work_days = filtered_df['DATE'].nunique()  # 출근일 수 계산
+        total_seconds = work_days * 9 * 60 * 60  # 9시간을 초로 변환
+        results[operator_id]['total_working_time'] = total_seconds
+
+calculate_total_working_time_for_operators(data, operator_ids, results)
+
+# 각 operator_id에 대해 실동 공수 계산
+def calculate_productive_time(data, operator_ids, standard_time_map, results):
+    for operator_id in operator_ids:
+        # operator_id 데이터 필터링 및 TIME 정렬
+        op_data = data[data["ID"] == operator_id].copy()
+        op_data["TIME"] = pd.to_datetime(op_data["TIME"])
+        op_data = op_data.sort_values(by="TIME")
+
+        # PROCESS와 CODE 조합별로 그룹화하여 실동 공수를 계산
+        grouped = op_data.groupby(["PROCESS", "CODE"])
+
+        total_runtime = timedelta()  # 총 실동 공수
+        total_loss = timedelta()     # 총 LOSS 시간
+        for (process, code), group_data in grouped:
+            run_start_time = None
+            group_runtime = timedelta()
+            group_loss = timedelta()
+            stop_detected = False
+
+            # 각 행을 순회하며 실동 공수 및 LOSS 시간 계산
+            for _, row in group_data.iterrows():
+                if row["TYPE"] == "RUN":
+                    if run_start_time is None:
+                        run_start_time = row["TIME"]
+                        stop_detected = False
+                    elif run_start_time is not None and not stop_detected:
+                        loss_start_time = row["TIME"]
+                        group_loss += loss_start_time - run_start_time
+
+                elif row["TYPE"] == "STOP":
+                    if run_start_time is not None and not stop_detected:
+                        elapsed_time = row["TIME"] - run_start_time
+                        if elapsed_time > timedelta(hours=24):
+                            standard_time = standard_time_map.get((process, code), 0)
+                            group_runtime += timedelta(minutes=standard_time)
+                        else:
+                            group_runtime += elapsed_time
+                        run_start_time = None
+                        stop_detected = True
+
+            # 누락된 RUN/STOP의 경우 STANDARD_TIME 보정
+            if run_start_time is not None:
+                standard_time = standard_time_map.get((process, code), 0)
+                group_runtime += timedelta(minutes=standard_time)
+
+            total_runtime += group_runtime
+            total_loss += group_loss
+
+        # 결과를 딕셔너리에 추가
+        results[operator_id]['productive_time'] = int(total_runtime.total_seconds())
+
+calculate_productive_time(data, operator_ids, standard_time_map, results)
+
+# 각 operator_id에 대해 투입 수량, 불량 수량, 작업 공수 효율 계산
+def calculate_operator_metrics(data, operator_ids, results, standard_st):
+    # 작업자별로 데이터를 그룹화하여 처리
+    for operator_id in operator_ids:
+        operator_data = data[data['ID'] == operator_id]
+
+        # 해당 작업자의 데이터가 없는 경우 건너뜁니다.
+        if operator_data.empty:
+            continue
+
+        # 작업자별 TOTAL Process Results 및 투입 수량, 불량 수량, 표준 공수 계산
+        total_input_quantity = 0
+        total_defect_quantity = 0
+        standard_labor = 0
+
+        # SERIAL 별로 데이터를 그룹화하여 처리
+        for serial, group in operator_data.groupby('SERIAL'):
+            # 각 PROCESS별로 데이터 처리
+            for process, process_group in group.groupby('PROCESS'):
+                true_count = 0
+                false_count = 0
+                stop_found = False  # STOP이 발견되었는지 여부
+
+                # PROCESS 내에서 각 행을 순회
+                for _, row in process_group.iterrows():
+                    row_type = row['TYPE']
+                    pass_value = row['PASS']
+
+                    # TYPE이 STOP인 경우
+                    if row_type == 'STOP' and not stop_found:
+                        # 첫 번째 STOP의 PASS 값을 체크하여 TRUE/FALSE를 증가
+                        if pass_value == 'TRUE':
+                            true_count += 1
+                        elif pass_value == 'FALSE':
+                            false_count += 1
+                        stop_found = True  # 첫 번째 STOP을 처리한 후 더 이상 STOP을 처리하지 않음
+
+                # STOP이 하나도 없었다면 TRUE 개수에 +1
+                if not stop_found:
+                    true_count += 1
+
+                # 투입 수량과 불량 수량 누적
+                total_input_quantity += true_count + false_count
+                total_defect_quantity += false_count
+
+                # 표준 공수 계산 (process별 total count * 표준 ST)
+                if process in standard_st:
+                    total_count = true_count + false_count
+                    standard_labor += total_count * standard_st[process]
+
+        # 작업 공수 효율 계산
+        total_working_time = results[operator_id].get('total_working_time', 0)
+        if total_working_time > 0:
+            work_efficiency = standard_labor / total_working_time * 100
+        else:
+            work_efficiency = None
+
+        # 결과 저장
+        results[operator_id]['input'] = total_input_quantity
+        results[operator_id]['fail'] = total_defect_quantity
+        results[operator_id]['efficiency'] = work_efficiency
+
+calculate_operator_metrics(data, operator_ids, results, standard_st)
+
+# 각 operator_id에 대해 성능 가동 시간 계산
+def calculate_performance_time(df, standard_time_map):
+    for operator_id in operator_ids:
+        operator_data = df[df['ID'] == operator_id]
+        performance_time = 0
+
+        # 시리얼 번호 별로 그룹화
+        grouped = operator_data.groupby('SERIAL')
+
+        for serial, group in grouped:            
+            # Process와 Code별 성능 가동 시간 계산
+            run_stops = group.sort_values('TIME')
+            stop_rows = run_stops[run_stops['TYPE'] == 'STOP']
+            run_rows = run_stops[run_stops['TYPE'] == 'RUN']
+
+            # 1. RUN-STOP 짝이 맞는 경우
+            matched_stops = set()
+            if not stop_rows.empty and not run_rows.empty:
+                for _, stop_row in stop_rows.iterrows():
+                    process = stop_row['PROCESS']
+                    code = stop_row['CODE']
+                    if (process, code) in standard_time_map:
+                        performance_time += standard_time_map[(process, code)]
+                        matched_stops.add(stop_row['PROCESS'])  # 짝지어진 STOP 기록
+
+            # 2. STOP만 있는 경우 (짝이 맞지 않는 STOP)
+            unmatched_stops = stop_rows[~stop_rows['PROCESS'].isin(matched_stops)]
+            if not unmatched_stops.empty:
+                for _, stop_row in unmatched_stops.iterrows():
+                    process = stop_row['PROCESS']
+                    code = stop_row['CODE']
+                    if (process, code) in standard_time_map:
+                        performance_time += standard_time_map[(process, code)]
+
+            # 3. RUN만 있는 경우
+            unmatched_runs = run_rows[~run_rows['PROCESS'].isin(matched_stops)]
+            if not unmatched_runs.empty:
+                for _, run_row in unmatched_runs.iterrows():
+                    process = run_row['PROCESS']
+                    code = run_row['CODE']
+                    if (process, code) in standard_time_map:
+                        performance_time += standard_time_map[(process, code)]
+
+        # 성능 가동 시간을 results 딕셔너리에 저장
+        results[operator_id]['performance'] = performance_time
+
+calculate_performance_time(data, standard_time_map)
+
+# 커서 생성
+cursor = conn.cursor()
+
+# UPDATE 쿼리
+query = """
+UPDATE operatorTBL
+SET 
+    OPERATOR_TOTAL_WORKING_TIME = %s,
+    OPERATOR_TOTAL_PRODUCTIVE_TIME = %s,
+    OPERATOR_TOTAL_INPUT = %s,
+    OPERATOR_TOTAL_FAIL = %s,
+    OPERATOR_PERFORMANCE = %s,
+    OPERATOR_EFFICIENCY = %s
+WHERE OPERATOR_ID = %s
+"""
+
+# 데이터 업데이트 실행
+for operator_id, data in results.items():
+    # values는 업데이트에 필요한 데이터를 튜플로 저장
+    values = (
+        data['total_working_time'],
+        data['productive_time'],
+        data['input'],
+        data['fail'],
+        data['performance'],
+        data['efficiency'],
+        operator_id
+    )
+    cursor.execute(query, values)
+
+# 변경 사항 커밋
+conn.commit()
+
+# 연결 닫기
+cursor.close()
+conn.close()
+
+print("Database update complete.")
+
+# 결과 확인
+for operator_id, result in results.items():
+    print(f"{operator_id}: {result}")
