@@ -1,1 +1,420 @@
+import sys
+import mysql.connector
+import pandas as pd
+from datetime import timedelta, datetime
 
+# MySQL 데이터베이스에 연결
+conn = mysql.connector.connect(
+    host='localhost',
+    user='root',
+    password='1234',
+    database='smartfactorydb'
+)
+
+# 명령줄 인수로부터 시작 날짜와 종료 날짜를 가져옴
+if len(sys.argv) != 3:
+    print("Usage: python date_operator_db.py <start_date> <end_date>")
+    sys.exit(1)
+
+# 시작 날짜와 종료 날짜를 설정
+date1 = pd.to_datetime(sys.argv[1])
+date2 = pd.to_datetime(sys.argv[2])
+
+# date2에 끝 시간을 추가
+date2 = date2 + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+# 입력받은 날짜 출력
+print(f"Start Date: {date1}")
+print(f"End Date: {date2}")
+
+# # 기간 설정
+# date1 = pd.to_datetime("2024-11-20")
+# date2 = pd.to_datetime("2024-11-30") + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+# 커서 객체 생성
+cursor = conn.cursor()
+
+# eventTBL, operatorTBL 데이터 불러오기
+query = "SELECT * FROM eventTBL"
+data_sql = pd.read_sql(query, conn)
+
+query1 = "SELECT MACHINE_ID FROM machineTBL"
+machine_ids_sql = pd.read_sql(query1, conn)
+
+data_2024 = data_sql[(data_sql['TIME'] >= date1) & (data_sql['TIME'] <= date2)]
+machine_ids = machine_ids_sql['MACHINE_ID'].tolist()
+
+# 데이터의 TIME 컬럼을 datetime 형식으로 변환
+data_2024['TIME'] = pd.to_datetime(data_2024['TIME'])
+
+results = { machine_id: {
+        'MACHINE_TOTAL_WORKING_TIME': 0,
+        'MACHINE_TOTAL_PRODUCTIVE_TIME': 0,
+        'MACHINE_TOTAL_INPUT': 0,
+        'MACHINE_TOTAL_FAIL': 0,
+        'MACHINE_PERFORMANCE': 0,
+        'MACHINE_EFFICIENCY': 0,
+        'MACHINE_REAL_PRODUCTIVE_TIME': 0,
+        'MACHINE_VALUE_PRODUCTIVE_TIME': 0,
+        'COMPLETE_COUNT': 0,
+        'PASS_COUNT': 0
+    } for machine_id in machine_ids}
+
+# 기종(PRODUCT)과 공정(PROCESS)별 CYCLE_TIME 정보
+cycle_times = {
+    ('BP60010', 'BLW01'): 40,
+    ('BP60010', 'ASM02'): 45,
+    ('BP60010', 'PNT03'): 50,
+    ('BP60011', 'BLW01'): 42,
+    ('BP60011', 'ASM02'): 46,
+    ('BP60011', 'PNT03'): 41,
+    ('BP60012', 'BLW01'): 44,
+    ('BP60012', 'ASM02'): 48,
+    ('BP60012', 'PNT03'): 43
+}
+
+# 설비별 총 부하 시간 계산 (9시간 기준)
+working_days = data_2024.groupby('ID')['TIME'].apply(lambda x: x.dt.date.nunique())
+for machine_id, days in working_days.items():
+    if machine_id in results:  # machine_id가 results 딕셔너리에 있는 경우
+        results[machine_id]['MACHINE_TOTAL_WORKING_TIME'] = days * 9 * 3600  # 총 작업 시간을 계산하여 저장
+
+# 설비별 총 가동 시간을 계산하는 함수 정의
+def calculate_total_productive_time(group):
+    total_productive_seconds = 0  # 전체 생산 시간(초 단위)
+    run_stop_pairs = []  # RUN-STOP 쌍을 저장할 리스트
+
+    # SERIAL(시리얼 번호)별로 데이터를 그룹화하여 처리
+    for serial, serial_group in group.groupby('SERIAL'):
+        # PROCESS(공정)와 CODE(기종)별로 데이터를 그룹화하여 처리
+        for (process, code), process_group in serial_group.groupby(['PROCESS', 'CODE']):
+            # TIME 열 기준으로 정렬 후 인덱스를 초기화
+            process_group = process_group.sort_values(by='TIME').reset_index(drop=True)
+            
+            # RUN 및 STOP 데이터를 각각 추출
+            run_times = process_group.loc[process_group['TYPE'] == 'RUN', 'TIME'].reset_index(drop=True)
+            stop_times = process_group.loc[process_group['TYPE'] == 'STOP', 'TIME'].reset_index(drop=True)
+
+            # RUN-STOP 쌍을 매칭하고 생산 시간 계산
+            run_index = 0
+            stop_index = 0
+            while run_index < len(run_times) or stop_index < len(stop_times):
+                if run_index < len(run_times) and stop_index < len(stop_times):
+                    # RUN 시간이 STOP 시간보다 이전일 경우
+                    run_time = run_times.iloc[run_index]
+                    stop_time = stop_times.iloc[stop_index]
+                    if run_time < stop_time:
+                        # RUN-STOP 시간 차이를 초 단위로 계산
+                        productive_seconds = (stop_time - run_time).total_seconds()
+                        total_productive_seconds += productive_seconds
+                        run_stop_pairs.append((run_time, stop_time, productive_seconds))
+                        run_index += 1
+                        stop_index += 1
+                elif run_index < len(run_times):
+                    # RUN만 존재하고 STOP이 없는 경우
+                    ct = cycle_times.get((code, process), 0)
+                    stop_time = run_times.iloc[run_index] + pd.Timedelta(minutes=ct)
+                    productive_seconds = ct * 60
+                    total_productive_seconds += productive_seconds
+                    run_stop_pairs.append((run_times.iloc[run_index], stop_time, productive_seconds))
+                    run_index += 1
+                elif stop_index < len(stop_times):
+                    # STOP만 존재하고 RUN이 없는 경우
+                    ct = cycle_times.get((code, process), 0)
+                    run_time = stop_times.iloc[stop_index] - pd.Timedelta(minutes=ct)
+                    productive_seconds = ct * 60
+                    total_productive_seconds += productive_seconds
+                    run_stop_pairs.append((run_time, stop_times.iloc[stop_index], productive_seconds))
+                    stop_index += 1
+
+    return total_productive_seconds, run_stop_pairs
+
+# 설비 ID별로 생산 시간 계산 및 딕셔너리에 저장
+machine_ids = data_2024['ID'].unique()
+total_productive_info = data_2024.groupby('ID').apply(calculate_total_productive_time)
+
+# 딕셔너리에 계산된 값 추가
+for machine_id, (total_productive_seconds, _) in total_productive_info.items():
+    if machine_id in results:
+        results[machine_id]['MACHINE_TOTAL_PRODUCTIVE_TIME'] = total_productive_seconds
+
+# 설비별 결과를 저장할 딕셔너리
+machine_results = {}
+
+for machine_id in machine_ids:
+    # 설비 ID에 해당하는 데이터 필터링
+    machine_data = data_2024[data_2024['ID'] == machine_id]
+    # 해당 설비 결과를 저장할 딕셔너리 초기화
+    machine_results[machine_id] = {'TOTAL': {}}
+
+    # 시리얼(SERIAL)별로 데이터를 그룹화하여 처리
+    for serial, group in machine_data.groupby('SERIAL'):
+        
+        # 공정(PROCESS)별로 데이터를 처리
+        for process, process_group in group.groupby('PROCESS'):
+            # TRUE/FALSE에 대한 카운트를 초기화
+            if process not in machine_results[machine_id]['TOTAL']:
+                machine_results[machine_id]['TOTAL'][process] = {'TRUE': 0, 'FALSE': 0}
+                
+            stop_found = False  # STOP이 발견되었는지 여부 확인
+
+            # 공정 그룹 내의 각 행을 순회하며 처리
+            for _, row in process_group.iterrows():
+                row_type = row['TYPE']
+                pass_value = row['PASS']
+                
+                # TYPE이 STOP이고, 아직 STOP이 발견되지 않은 경우
+                if row_type == 'STOP' and not stop_found:
+                    # 첫 번째 STOP의 PASS 값을 확인하고 카운트 갱신
+                    if pass_value == 'TRUE':
+                        machine_results[machine_id]['TOTAL'][process]['TRUE'] += 1
+                    elif pass_value == 'FALSE':
+                        machine_results[machine_id]['TOTAL'][process]['FALSE'] += 1
+                    stop_found = True  # STOP이 발견되었음을 표시
+                
+            # STOP이 발견되지 않은 경우 TRUE 카운트를 증가
+            if not stop_found:
+                machine_results[machine_id]['TOTAL'][process]['TRUE'] += 1
+
+# 설비별로 총 투입 수량과 불량 수량 계산
+for machine_id, result in machine_results.items():
+    if machine_id not in results:
+        continue  # results에 없는 ID는 건너뜀
+
+    total_input_quantity = 0  # 총 투입 수량
+    total_defect_quantity = 0  # 총 불량 수량
+
+    for process, counts in result['TOTAL'].items():
+        true_count = counts['TRUE']
+        false_count = counts['FALSE']
+        total_input_quantity += true_count + false_count
+        total_defect_quantity += false_count
+
+    # 딕셔너리에 계산된 값 저장
+    results[machine_id]['MACHINE_TOTAL_INPUT'] = total_input_quantity
+    results[machine_id]['MACHINE_TOTAL_FAIL'] = total_defect_quantity
+
+# 완성수, 양품수 계산
+def calculate_counts(group):
+    complete_count = 0
+    pass_count = 0
+
+    for serial, serial_group in group.groupby('SERIAL'):
+        processes = serial_group.groupby('PROCESS')['PASS'].last()
+
+        # 완성수: 공정 3개를 모두 거친 경우
+        if all(proc in processes for proc in ['BLW01', 'ASM02', 'PNT03']):
+            complete_count += 1
+            # 양품수: 마지막 공정(PNT03)이 PASS인 경우
+            pnt03_pass = processes.get('PNT03')
+
+            # None, NaN 또는 PASS 값이 'TRUE'인 경우 처리
+            if (
+                pd.isna(pnt03_pass)  # NaN 값
+                or pnt03_pass is None  # None 값
+                or str(pnt03_pass).strip().upper() == 'TRUE'  # 문자열로 'TRUE'
+                or str(pnt03_pass).strip() == ''  # 빈 문자열
+            ):
+                pass_count += 1
+
+    return complete_count, pass_count
+
+# 데이터 그룹화 및 결과 계산
+counts_info = data_2024.groupby('ID').apply(calculate_counts)
+
+# 설비 ID별 완성수와 양품수를 딕셔너리에 저장
+for machine_id in results.keys():
+    complete_count, pass_count = calculate_counts(data_2024[data_2024['ID'] == machine_id])
+    results[machine_id]['COMPLETE_COUNT'] = complete_count
+    results[machine_id]['PASS_COUNT'] = pass_count
+
+# 실가동시간 계산 함수 (수정 버전)
+def calculate_real_productive_time(group, cycle_times):
+    total_real_productive_seconds = 0  # 총 실가동시간을 초 단위로 저장할 변수 초기화
+
+    # 'SERIAL'을 기준으로 데이터를 그룹화하여 각 시리얼별로 처리
+    for serial, serial_group in group.groupby('SERIAL'):
+        processes = serial_group['PROCESS'].unique()  # 해당 시리얼에서 사용된 공정 목록을 가져옴
+
+        # 공정을 모두 거쳤는지 확인: BLW01, ASM02, PNT03 모두 포함되었을 때
+        if all(proc in processes for proc in ['BLW01', 'ASM02', 'PNT03']):
+            # 'PROCESS'와 'CODE'를 기준으로 데이터를 그룹화하여 각 공정별, 코드별로 처리
+            for (process, code), process_group in serial_group.groupby(['PROCESS', 'CODE']):
+                process_group = process_group.sort_values(by='TIME').reset_index(drop=True)  # 'TIME' 순으로 정렬
+
+                # 'RUN'과 'STOP' 타입의 시간 데이터를 각각 추출
+                run_times = process_group.loc[process_group['TYPE'] == 'RUN', 'TIME'].reset_index(drop=True)
+                stop_times = process_group.loc[process_group['TYPE'] == 'STOP', 'TIME'].reset_index(drop=True)
+
+                run_index, stop_index = 0, 0  # 'RUN'과 'STOP'의 인덱스를 추적할 변수 초기화
+
+                # 'RUN'과 'STOP' 시간이 모두 처리될 때까지 반복
+                while run_index < len(run_times) or stop_index < len(stop_times):
+                    if run_index < len(run_times) and stop_index < len(stop_times):  # 'RUN'과 'STOP'이 모두 존재하는 경우
+                        run_time = run_times.iloc[run_index]  # 현재 'RUN' 시간
+                        stop_time = stop_times.iloc[stop_index]  # 현재 'STOP' 시간
+
+                        # 'RUN' 시간보다 'STOP' 시간이 더 클 경우, 실제 가동 시간은 'STOP' - 'RUN' 
+                        if run_time < stop_time:
+                            total_real_productive_seconds += (stop_time - run_time).total_seconds()  # 초 단위로 더함
+                            run_index += 1  # 'RUN' 시간 인덱스 증가
+                            stop_index += 1  # 'STOP' 시간 인덱스 증가
+                        else:
+                            # 'STOP' 시간보다 'RUN' 시간이 더 클 경우, 주어진 사이클 타임을 사용하여 시간 계산
+                            ct = cycle_times.get((code, process), 0)  # 'CODE'와 'PROCESS'에 대한 사이클 타임 조회
+                            total_real_productive_seconds += ct * 60  # 사이클 타임을 분으로 변환하여 더함
+                            run_index += 1  # 'RUN' 시간 인덱스 증가
+                    elif run_index < len(run_times):  # 'STOP'이 없고 'RUN'만 있는 경우
+                        ct = cycle_times.get((code, process), 0)  # 'CODE'와 'PROCESS'에 대한 사이클 타임 조회
+                        total_real_productive_seconds += ct * 60  # 사이클 타임을 분으로 변환하여 더함
+                        run_index += 1  # 'RUN' 시간 인덱스 증가
+                    elif stop_index < len(stop_times):  # 'RUN'이 없고 'STOP'만 있는 경우
+                        ct = cycle_times.get((code, process), 0)  # 'CODE'와 'PROCESS'에 대한 사이클 타임 조회
+                        total_real_productive_seconds += ct * 60  # 사이클 타임을 분으로 변환하여 더함
+                        stop_index += 1  # 'STOP' 시간 인덱스 증가
+
+    return total_real_productive_seconds  # 총 실가동시간을 반환
+
+# 각 설비의 실가동 시간을 딕셔너리에 저장
+for machine_id in results.keys():
+    real_productive_time = calculate_real_productive_time(
+        data_2024[data_2024['ID'] == machine_id],  # 특정 설비 ID의 데이터 필터링
+        cycle_times
+    )
+    results[machine_id]['MACHINE_REAL_PRODUCTIVE_TIME'] = real_productive_time
+
+# 설비의 생산량 및 성능 가동 시간 계산 함수
+def calculate_product_ct(data_2024, cycle_times):
+    production_counts = {}
+    for product in ['BP60010', 'BP60011', 'BP60012']:
+        # 각 기종별로 완료된 SERIAL(시리얼 번호) 개수 계산
+        completed_serials = data_2024[
+            (data_2024['CODE'] == product) & 
+            (data_2024['PROCESS'].isin(['BLW01', 'ASM02', 'PNT03']))
+        ]['SERIAL'].unique()
+        production_counts[product] = len(completed_serials)
+    
+    # 기종별 표준 CYCLE_TIME에 따른 성능 시간 계산
+    total_performance_time = 0
+    for product, count in production_counts.items():
+        product_ct = sum([cycle_times.get((product, process), 0) for process in ['BLW01', 'ASM02', 'PNT03']])
+        total_performance_time += product_ct * count
+    
+    return total_performance_time
+
+# 성능 가동 시간을 딕셔너리에 저장
+for machine_id in results.keys():
+    performance_time = calculate_product_ct(
+        data_2024[data_2024['ID'] == machine_id],  # 특정 설비 ID의 데이터 필터링
+        cycle_times
+    )
+    results[machine_id]['MACHINE_PERFORMANCE'] = performance_time
+
+# 설비별 가치 가동 시간 구하는 함수
+def calculate_value_ct(data_2024, cycle_times):
+    production_counts = {}
+    for product in ['BP60010', 'BP60011', 'BP60012']:
+        # 각 기종별로 BLW01, ASM02, PNT03를 모두 거친 후 PASS된 양품 SERIAL 개수 계산
+        completed_serials = data_2024[
+            (data_2024['CODE'] == product) & 
+            (data_2024['PROCESS'].isin(['BLW01', 'ASM02', 'PNT03']))
+        ]
+        
+        # PASS 열에서 PNT03이 TRUE인지 확인
+        valid_serials = completed_serials.groupby('SERIAL').filter(
+            lambda x: set(['BLW01', 'ASM02', 'PNT03']).issubset(x['PROCESS'].unique()) and 
+                      (x[x['PROCESS'] == 'PNT03']['PASS'] == "TRUE").any()
+        )['SERIAL'].unique()
+        
+        production_counts[product] = len(valid_serials)
+    
+    # 기종별 표준 CYCLE_TIME에 따른 가치 시간 계산
+    total_value_time = 0
+    for product, count in production_counts.items():
+        product_ct = sum([cycle_times.get((product, process), 0) for process in ['BLW01', 'ASM02', 'PNT03']])
+        total_value_time += product_ct * count
+    
+    return total_value_time
+
+
+# 설비 ID별 가치 가동 시간을 딕셔너리에 저장
+for machine_id in results.keys():
+    value_productive_time = calculate_value_ct(
+        data_2024[data_2024['ID'] == machine_id],  # 특정 설비 ID의 데이터 필터링
+        cycle_times
+    )
+    results[machine_id]['MACHINE_VALUE_PRODUCTIVE_TIME'] = value_productive_time
+
+
+# 설비 ID별 'MACHINE_EFFICIENCY' 계산 및 딕셔너리에 저장
+for machine_id in results.keys():
+    # 데이터를 가져옴
+    total_working_time = results[machine_id].get('MACHINE_TOTAL_WORKING_TIME', 0)
+    total_productive_time = results[machine_id].get('MACHINE_TOTAL_PRODUCTIVE_TIME', 0)
+    performance = results[machine_id].get('MACHINE_PERFORMANCE', 0)
+    complete_count = results[machine_id].get('COMPLETE_COUNT', 0)
+    pass_count = results[machine_id].get('PASS_COUNT', 0)
+
+    # 시간 가동율 계산
+    if total_working_time > 0:
+        time_availability = (total_productive_time / total_working_time) * 100
+    else:
+        time_availability = 0
+
+    # 성능 가동율 계산
+    if total_productive_time > 0:
+        performance_availability = (performance / total_productive_time) * 100
+    else:
+        performance_availability = 0
+
+    # 양품율 계산
+    if complete_count > 0:
+        quality_rate = (pass_count / complete_count) * 100
+    else:
+        quality_rate = 0
+
+    # 설비 종합 효율(OEE) 계산
+    machine_efficiency = (time_availability * performance_availability * quality_rate) / 10000
+
+    # 결과를 딕셔너리에 저장
+    results[machine_id]['MACHINE_EFFICIENCY'] = machine_efficiency
+
+# Update machinetbl with calculated values
+update_query = """
+    UPDATE machinetbl
+    SET MACHINE_TOTAL_WORKING_TIME = %s,
+        MACHINE_TOTAL_PRODUCTIVE_TIME = %s,
+        MACHINE_TOTAL_INPUT = %s,
+        MACHINE_TOTAL_FAIL = %s,
+        MACHINE_PERFORMANCE = %s,
+        MACHINE_EFFICIENCY = %s,
+        MACHINE_REAL_PRODUCTIVE_TIME = %s,
+        MACHINE_VALUE_PRODUCTIVE_TIME = %s
+    WHERE MACHINE_ID = %s
+"""
+
+# 데이터 업데이트 실행
+for machine_id, data in results.items():
+    values = (
+        data['MACHINE_TOTAL_WORKING_TIME'],
+        data['MACHINE_TOTAL_PRODUCTIVE_TIME'],
+        data['MACHINE_TOTAL_INPUT'],
+        data['MACHINE_TOTAL_FAIL'],
+        data['MACHINE_PERFORMANCE'],
+        data['MACHINE_EFFICIENCY'],
+        data['MACHINE_REAL_PRODUCTIVE_TIME'],
+        data['MACHINE_VALUE_PRODUCTIVE_TIME'],
+        machine_id
+    )
+    cursor.execute(update_query, values)
+
+# Commit changes and close the connection
+conn.commit()
+cursor.close()
+conn.close()
+
+print("Database update complete.")
+
+# 결과 확인
+for machine_id, result in results.items():
+    print(f"{machine_id}: {result}")
