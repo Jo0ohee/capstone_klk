@@ -1,1 +1,1883 @@
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+using System.Windows.Forms.DataVisualization.Charting;
+using MySql.Data.MySqlClient;
+using static System.Windows.Forms.VisualStyles.VisualStyleElement.ToolTip;
+using static Google.Protobuf.Reflection.GeneratedCodeInfo.Types;
 
+
+namespace WindowsFormsApp6
+{
+    public partial class Form1 : Form
+    {
+        private string connectionString = "server=localhost;user=root;password=1234;database=smartfactoryDB";
+        private ToolTip chartToolTip = new ToolTip(); 
+        public Form1()
+        {
+            InitializeComponent();
+
+            // Timer 설정
+            timer1.Interval = 60000;
+            timer1.Tick += timer1_Tick;
+            timer1.Enabled = true;
+            timer1.Start();
+
+            OPdateTimePickerStart.Value = DateTime.Today.AddDays(-5);
+            OPdateTimePickerEnd.Value = DateTime.Today;
+
+            EQdateTimePickerStart.Value = DateTime.Today.AddDays(-5);
+            EQdateTimePickerEnd.Value = DateTime.Today;
+
+            PdateTimePickerStart.Value = DateTime.Today.AddDays(-5);
+            PdateTimePickerEnd.Value = DateTime.Today;
+
+            string startDate = OPdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+            string endDate = OPdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+            // 작업자
+            LoadComboBox();
+            comboBox2.SelectedIndexChanged += ComboBox2_SelectedIndexChanged;
+            LoadInitialOperatorData("date_operator_db.py", startDate, endDate);
+
+            // 설비
+            LoadMachineComboBox();
+            comboBox1.SelectedIndexChanged += ComboBox1_SelectedIndexChanged;
+            LoadInitialMachineData("date_machine_db.py", startDate, endDate);
+
+            // 제품
+            LoadInitialPlmData("date_plm_db.py", startDate, endDate);
+
+            InitializeChartToolTip();
+            InitializeChartClickEvents();
+        }
+
+        // Python 스크립트 실행 메서드
+        private void RunPythonScript(string scriptName, string startDate, string endDate)
+        {
+            try
+            {
+                ProcessStartInfo start = new ProcessStartInfo
+                {
+                    FileName = "python",
+                    Arguments = $"{scriptName} {startDate} {endDate}",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                using (Process process = Process.Start(start))
+                {
+                    using (StreamReader reader = process.StandardOutput)
+                    {
+                        string result = reader.ReadToEnd();
+                    }
+
+                    using (StreamReader errorReader = process.StandardError)
+                    {
+                        string errors = errorReader.ReadToEnd();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Python 실행 중 오류 발생: {ex.Message}");
+            }
+        }
+
+        // 작업자 초기 데이터 로드
+        private void LoadInitialOperatorData(string scriptName, string startDate, string endDate)
+        {
+            RunPythonScript(scriptName, startDate, endDate);
+
+            // 작업자 차트 초기화
+            LoadChart12("OP2410");  // 작업 공수 합계, 실동 공수 합계
+            LoadChart5("OP2410");  // 투입 수량, 불량 수량
+            LoadChart9("OP2410");  // 성능 가동 시간 합계
+            LoadChart2("OP2410");  // 작업 공수 효율
+        }
+
+        // 설비 초기 데이터 로드
+        private void LoadInitialMachineData(string scriptName, string startDate, string endDate)
+        {
+            RunPythonScript(scriptName, startDate, endDate);
+
+            // 설비 차트 초기화
+            LoadChart15("EQ2410");  // LOSS 차트
+            LoadChart18("EQ2410");  // 부하 시간, 가동 시간
+            LoadChart14("EQ2410");  // 투입 수량, 불량 수량
+            LoadChart13("EQ2410");  // 설비 종합 효율
+        }
+
+        // 제품 초기 데이터 로드
+        private void LoadInitialPlmData(string scriptName, string startDate, string endDate)
+        {
+            RunPythonScript(scriptName, startDate, endDate);
+
+            // 제품 차트, 표 초기화
+            LoadChart1("BP60010");  // BP60010의 양품, 불량
+            LoadDataGridView1("BP60010");  // BP60010 데이터 로드
+            LoadChart3("BP60011");  // BP60011의 양품, 불량
+            LoadDataGridView2("BP60011");  // BP60011 데이터 로드
+            LoadChart4("BP60012");  // BP60012의 양품, 불량
+            LoadDataGridView3("BP60012");  // BP60012 데이터 로드
+        }
+
+        // ToolTip 초기화
+        private void InitializeChartToolTip()
+        {
+            chart12.MouseMove += Chart_MouseMove;
+            chart9.MouseMove += Chart_MouseMove;
+            chart2.MouseMove += Chart_MouseMove;
+            chart18.MouseMove += Chart_MouseMove;
+            chart15.MouseMove += Chart_MouseMove;
+            chart13.MouseMove += Chart_MouseMove;
+        }
+
+        // LOSS 차트 클릭 초기화
+        private void InitializeChartClickEvents()
+        {
+            chart18.MouseClick += Chart18_MouseClick;
+        }
+
+        // chart18 마우스 클릭 이벤트
+        private void Chart18_MouseClick(object sender, MouseEventArgs e)
+        {
+            var chart = sender as Chart;
+            if (chart == null) return;
+
+            var hit = chart.HitTest(e.X, e.Y);
+            if (hit.ChartElementType == ChartElementType.DataPoint)
+            {
+                var series = hit.Series;
+                var point = series.Points[hit.PointIndex];
+                string machineId = point.AxisLabel;
+
+                LoadChart15(machineId);
+            }
+            else
+            {
+                MessageBox.Show("데이터 포인트를 클릭하세요.");
+            }
+        }
+
+        // ToolTip 표시
+        private void Chart_MouseMove(object sender, MouseEventArgs e)
+        {
+            var chart = sender as Chart;
+            if (chart == null) return;
+
+            var hit = chart.HitTest(e.X, e.Y);
+            if (hit.ChartElementType == ChartElementType.DataPoint)
+            {
+                var series = hit.Series;
+                var point = series.Points[hit.PointIndex];
+
+                chartToolTip.SetToolTip(chart, $"{point.AxisLabel ?? point.XValue.ToString()}\n{series.Name}: {point.YValues[0]}");
+            }
+            else
+            {
+                chartToolTip.SetToolTip(chart, string.Empty);
+            }
+        }
+
+        // DataGridView의 기본 설정
+        private void ConfigureDataGridView(DataGridView dataGridView)
+        {
+            dataGridView.ColumnHeadersVisible = false;
+            dataGridView.RowHeadersVisible = false;
+            dataGridView.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            dataGridView.CellBorderStyle = DataGridViewCellBorderStyle.Single;
+            dataGridView.BorderStyle = BorderStyle.None;
+            dataGridView.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            dataGridView.AutoSizeRowsMode = DataGridViewAutoSizeRowsMode.AllCells;
+            dataGridView.AllowUserToAddRows = false;
+            dataGridView.ReadOnly = true;
+            dataGridView.DefaultCellStyle.SelectionBackColor = dataGridView.DefaultCellStyle.BackColor;
+            dataGridView.DefaultCellStyle.SelectionForeColor = dataGridView.DefaultCellStyle.ForeColor;
+            dataGridView.ScrollBars = ScrollBars.None;
+        }
+
+        // 콤보박스에 작업자 그룹 로드
+        private void LoadComboBox()
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = "SELECT DISTINCT LEFT(OPERATOR_ID, 6) AS OperatorGroup FROM operatorTBL";
+                    MySqlCommand cmd = new MySqlCommand(query, conn);
+                    MySqlDataReader reader = cmd.ExecuteReader();
+
+                    while (reader.Read())
+                    {
+                        comboBox2.Items.Add(reader["OperatorGroup"].ToString());
+                    }
+                    reader.Close();
+                }
+                if (comboBox2.Items.Count > 0)
+                {
+                    comboBox2.SelectedIndex = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading ComboBox: {ex.Message}");
+            }
+        }
+
+        // 작업자 조회 버튼
+        private void button1_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                string startDate = OPdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+                string endDate = OPdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+                RunPythonScript("date_operator_db.py", startDate, endDate);
+
+                string selectedOperatorGroup = comboBox2.SelectedItem?.ToString() ?? "OP2410";
+                LoadChart12(selectedOperatorGroup);
+                LoadChart5(selectedOperatorGroup);
+                LoadChart9(selectedOperatorGroup);
+                LoadChart2(selectedOperatorGroup);
+
+                MessageBox.Show("데이터가 성공적으로 새로고침되었습니다!", "새로고침 완료");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("오류 발생: " + ex.Message, "오류");
+            }
+        }
+
+        // 작업자 탭 : 작업 공수 합계, 실동 공수 합계
+        private void LoadChart12(string operatorGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT OPERATOR_ID, OPERATOR_TOTAL_WORKING_TIME, OPERATOR_TOTAL_PRODUCTIVE_TIME
+                        FROM operatorTBL
+                        WHERE OPERATOR_ID LIKE '{operatorGroup}-%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart12.Series.Clear();
+                    chart12.Titles.Clear();
+                    chart12.Legends.Clear();
+
+                    chart12.Titles.Add("작업자 ID 별로 작업 공수 합계, 실동 공수 합계");
+
+                    var workingSeries = chart12.Series.Add("작업 공수 합계");
+                    workingSeries.ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Column;
+
+                    var productiveSeries = chart12.Series.Add("실동 공수 합계");
+                    productiveSeries.ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Column;
+
+                    Color[] workingColors = { Color.DodgerBlue, Color.LimeGreen, Color.PaleVioletRed, Color.Salmon };
+                    Color[] productiveColors = { Color.LightBlue, Color.LightGreen, Color.Pink, Color.LightSalmon };
+
+                    int colorIndex = 0;
+                    int totalWorkingTime = 0;
+                    int totalProductiveTime = 0;
+                    int rowCount = dt.Rows.Count;
+                    int maxYValue = 0;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["OPERATOR_ID"].ToString();
+                        int workingTime = Convert.ToInt32(row["OPERATOR_TOTAL_WORKING_TIME"]);
+                        int productiveTime = Convert.ToInt32(row["OPERATOR_TOTAL_PRODUCTIVE_TIME"]);
+
+                        var workingPoint = workingSeries.Points.AddXY(operatorId, workingTime);
+                        workingSeries.Points[workingPoint].Color = workingColors[colorIndex % workingColors.Length];
+
+                        var productivePoint = productiveSeries.Points.AddXY(operatorId, productiveTime);
+                        productiveSeries.Points[productivePoint].Color = productiveColors[colorIndex % productiveColors.Length];
+
+                        maxYValue = Math.Max(maxYValue, Math.Max(workingTime, productiveTime));
+
+                        totalWorkingTime += workingTime;
+                        totalProductiveTime += productiveTime;
+
+                        colorIndex++;
+                    }
+
+                    double averageWorkingTime = rowCount > 0 ? (double)totalWorkingTime / rowCount : 0;
+                    double averageProductiveTime = rowCount > 0 ? (double)totalProductiveTime / rowCount : 0;
+
+                    chart12.ChartAreas[0].AxisY.Minimum = 0;
+                    chart12.ChartAreas[0].AxisY.Maximum = maxYValue + (maxYValue * 0.1);
+                    chart12.ChartAreas[0].AxisY.IntervalAutoMode = IntervalAutoMode.FixedCount;
+
+                    chart12.ChartAreas[0].AxisX.LabelStyle.Angle = 0;
+                    chart12.ChartAreas[0].AxisX.Interval = 1;
+
+                    chart12.ChartAreas[0].Position = new ElementPosition(5, 8, 85, 85);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 초)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 93,
+                    };
+                    chart12.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "작업 공수  =  출근일  X  9H \n실동 공수 = 끝 시간 - 시작 시간",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.TopCenter,
+                        X = 28,
+                        Y = 93,
+                    };
+                    chart12.Annotations.Add(annotation1);
+
+                    dataGridView5.Rows.Clear();
+                    dataGridView5.Columns.Clear();
+
+                    dataGridView5.Columns.Add("Category", "Category");
+                    dataGridView5.Columns.Add("Value", "Value");
+
+                    string selectedOperatorGroup = comboBox2.SelectedItem?.ToString();
+                    dataGridView5.Rows.Add($"{selectedOperatorGroup} 평균 작업 공수 합계", $"{averageWorkingTime:F2} 초");
+                    dataGridView5.Rows.Add($"{selectedOperatorGroup} 평균 실동 공수 합계", $"{averageProductiveTime:F2} 초");
+
+                    ConfigureDataGridView(dataGridView5);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart12: {ex.Message}");
+            }
+        }
+
+        // 작업자 탭 : 투입 수량, 불량 수량
+        private void LoadChart5(string operatorGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT OPERATOR_ID, OPERATOR_TOTAL_INPUT, OPERATOR_TOTAL_FAIL
+                        FROM operatorTBL
+                        WHERE OPERATOR_ID LIKE '{operatorGroup}-%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart5.Series.Clear();
+                    chart5.Titles.Clear();
+                    chart5.Legends.Clear();
+
+                    chart5.Titles.Add("작업자 ID 별로 투입 수량, 불량 수량");
+
+                    Color[] inputColors = { Color.DodgerBlue, Color.LimeGreen, Color.PaleVioletRed, Color.Salmon };
+                    Color[] failColors = { Color.LightBlue, Color.LightGreen, Color.Pink, Color.LightSalmon };
+
+                    int colorIndex = 0;
+
+                    var inputSeries = chart5.Series.Add("투입 수량");
+                    inputSeries.ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Column;
+
+                    var failSeries = chart5.Series.Add("불량 수량");
+                    failSeries.ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Column;
+
+                    double totalDefectRate = 0;
+                    int rowCount = dt.Rows.Count;
+                    int maxYValue = 0;
+
+                    string standardQuery = $@"
+                        WITH ranked_data AS (
+                            SELECT 
+                                ROUND(OPERATOR_TOTAL_FAIL/OPERATOR_TOTAL_INPUT * 100, 2) AS defectRate,
+                                PERCENT_RANK() OVER (ORDER BY ROUND(OPERATOR_TOTAL_FAIL/OPERATOR_TOTAL_INPUT, 2) ASC) AS rank_value
+                            FROM operatortbl
+                            WHERE OPERATOR_TOTAL_FAIL > 0 AND OPERATOR_TOTAL_INPUT > 0
+                        )
+                        SELECT defectRate
+                        FROM ranked_data
+                        WHERE rank_value >= 0.7
+                        ORDER BY defectRate ASC
+                        LIMIT 1;";
+
+                    MySqlCommand standardCommand = new MySqlCommand(standardQuery, conn);
+                    var standardValue = standardCommand.ExecuteScalar();
+                    float standard = Convert.ToSingle(standardValue);
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["OPERATOR_ID"].ToString();
+                        string operatorShortId = operatorId.Split('-')[1];
+                        int inputQuantity = Convert.ToInt32(row["OPERATOR_TOTAL_INPUT"]);
+                        int failQuantity = Convert.ToInt32(row["OPERATOR_TOTAL_FAIL"]);
+
+                        double defectRate = inputQuantity > 0 ? ((double)failQuantity / inputQuantity) * 100 : 0;
+                        totalDefectRate += defectRate;
+
+                        maxYValue = Math.Max(maxYValue, Math.Max(inputQuantity, failQuantity));
+
+                        var inputPoint = inputSeries.Points.AddXY(operatorId, inputQuantity);
+                        inputSeries.Points[inputPoint].Color = inputColors[colorIndex % inputColors.Length];
+
+                        var failPoint = failSeries.Points.AddXY(operatorShortId, failQuantity);
+
+                        if (defectRate >= standard)
+                        {
+                            failSeries.Points[failPoint].Color = Color.Red;
+                        }
+                        else
+                        {
+                            failSeries.Points[failPoint].Color = failColors[colorIndex % failColors.Length];
+                        }
+
+                        inputSeries.Points[inputPoint].ToolTip = $"{operatorId}\n투입 수량: {inputQuantity}";
+                        failSeries.Points[failPoint].ToolTip = $"{operatorId}\n불량 수량: {failQuantity}\n불량률: {defectRate:F2}%";
+
+                        colorIndex++;
+                    }
+
+                    double averageDefectRate = rowCount > 0 ? totalDefectRate / rowCount : 0;
+
+                    chart5.ChartAreas[0].AxisX.LabelStyle.Angle = 0;
+                    chart5.ChartAreas[0].AxisX.Interval = 1;
+
+                    chart5.ChartAreas[0].AxisY.Minimum = 0;
+                    chart5.ChartAreas[0].AxisY.Maximum = Math.Ceiling(maxYValue + (maxYValue * 0.1));
+                    //chart5.ChartAreas[0].AxisY.Interval = 1;
+                    chart5.ChartAreas[0].AxisY.LabelStyle.Format = "0";
+
+                    chart5.ChartAreas[0].Position = new ElementPosition(5, 8, 85, 85);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 개)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 90,
+                    };
+                    chart5.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "투입 수량 = 양품 수량 + 불량 수량 \n불량 수량 = PASS의 값이 FALSE",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 22,
+                        Y = 92,
+                    };
+                    chart5.Annotations.Add(annotation1);
+
+                    if (dataGridView5.Columns.Count == 0)
+                    {
+                        dataGridView5.Columns.Add("Category", "Category");
+                        dataGridView5.Columns.Add("Value", "Value");
+                    }
+
+                    string selectedOperatorGroup = comboBox2.SelectedItem?.ToString();
+                    dataGridView5.Rows.Add($"{selectedOperatorGroup} 평균 불량률", $"{averageDefectRate:F2} %");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart5: {ex.Message}");
+            }
+        }
+
+        // 작업자 탭 : 성능 가동 시간 합계
+        private void LoadChart9(string operatorGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT OPERATOR_ID, OPERATOR_PERFORMANCE
+                        FROM operatorTBL
+                        WHERE OPERATOR_ID LIKE '{operatorGroup}-%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart9.Series.Clear();
+                    chart9.Titles.Clear();
+                    chart9.Titles.Add("성능가동시간 합계");
+
+                    chart9.Series.Add("성능 가동시간");
+                    chart9.Series["성능 가동시간"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Pie;
+
+                    Color[] bubbleColors = { Color.LightBlue, Color.LightGreen, Color.Pink, Color.LightSalmon };
+
+                    int colorIndex = 0;
+                    int totalPerformanceTime = 0;
+                    int rowCount = dt.Rows.Count;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["OPERATOR_ID"].ToString();
+                        int performanceTime = Convert.ToInt32(row["OPERATOR_PERFORMANCE"]);
+
+                        var point = chart9.Series["성능 가동시간"].Points.AddXY(operatorId, performanceTime);
+                        chart9.Series["성능 가동시간"].Points[point].Color = bubbleColors[colorIndex % bubbleColors.Length];
+                        chart9.Series["성능 가동시간"].Points[point].Label = performanceTime.ToString();
+
+                        totalPerformanceTime += performanceTime;
+
+                        colorIndex++;
+                    }
+
+                    double averagePerformanceTime = rowCount > 0 ? (double)totalPerformanceTime / rowCount : 0;
+
+                    chart9.Series["성능 가동시간"].IsVisibleInLegend = true;
+                    chart9.Legends.Clear();
+                    chart9.Legends.Add("Legend1");
+                    chart9.Legends["Legend1"].Font = new Font("Arial", 9, FontStyle.Regular);
+                    chart9.Legends["Legend1"].Docking = System.Windows.Forms.DataVisualization.Charting.Docking.Right;
+
+                    for (int i = 0; i < chart9.Series["성능 가동시간"].Points.Count; i++)
+                    {
+                        chart9.Series["성능 가동시간"].Points[i].LegendText = chart9.Series["성능 가동시간"].Points[i].AxisLabel;
+                    }
+
+                    chart9.ChartAreas[0].Position = new ElementPosition(0, 15, 70, 70);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 초)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 85,
+                    };
+                    chart9.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "성능 가동 시간 = 완성 수 X 표준 Cycle Time",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8),
+                        Alignment = ContentAlignment.MiddleCenter,
+                        AnchorAlignment = ContentAlignment.TopCenter,
+                        X = 22,
+                        Y = 92,
+                    };
+                    chart9.Annotations.Add(annotation1);
+
+                    if (dataGridView5.Columns.Count == 0)
+                    {
+                        dataGridView5.Columns.Add("Category", "Category");
+                        dataGridView5.Columns.Add("Value", "Value");
+                    }
+
+                    string selectedOperatorGroup = comboBox2.SelectedItem?.ToString();
+                    dataGridView5.Rows.Add($"{selectedOperatorGroup} 평균 성능 가동시간", $"{averagePerformanceTime:F2} 초");
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart9: {ex.Message}");
+            }
+        }
+
+        // 작업자 탭 : 작업 공수 효율
+        private void LoadChart2(string operatorGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT OPERATOR_ID, OPERATOR_EFFICIENCY
+                        FROM operatorTBL
+                        WHERE OPERATOR_ID LIKE '{operatorGroup}-%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart2.Series.Clear();
+                    chart2.Titles.Clear();
+
+                    chart2.Titles.Add("작업자 ID 별로 작업 공수 효율");
+
+                    chart2.Series.Add("작업 공수 효율");
+                    chart2.Series["작업 공수 효율"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Bubble;
+
+                    Color[] workingColors = { Color.DodgerBlue, Color.LimeGreen, Color.PaleVioletRed, Color.Salmon };
+
+                    int colorIndex = 0;
+                    List<System.Windows.Forms.DataVisualization.Charting.DataPoint> blinkingPoints = new List<System.Windows.Forms.DataVisualization.Charting.DataPoint>();
+
+                    string standardQuery = $@"
+                        WITH ranked_data AS (
+                            SELECT 
+                                ROUND(OPERATOR_EFFICIENCY, 1) AS efficiency,
+                                PERCENT_RANK() OVER (ORDER BY OPERATOR_EFFICIENCY ASC) AS rank_value
+                            FROM operatortbl
+                            WHERE OPERATOR_EFFICIENCY > 0
+                        )
+                        SELECT efficiency
+                        FROM ranked_data
+                        WHERE rank_value <= 0.3
+                        ORDER BY efficiency DESC
+                        LIMIT 1";
+
+                    MySqlCommand standardCommand = new MySqlCommand(standardQuery, conn);
+                    var standardValue = standardCommand.ExecuteScalar();
+                    float standard = Convert.ToSingle(standardValue);
+
+                    chart2.ChartAreas[0].AxisY.StripLines.Clear();
+
+                    var stripLine = new StripLine
+                    {
+                        Interval = 0,
+                        IntervalOffset = standard,
+                        StripWidth = 0,
+                        BorderColor = Color.Red,
+                        BorderWidth = 2,
+                        BorderDashStyle = ChartDashStyle.Solid,
+                        Text = standard.ToString()
+                    };
+
+                    chart2.ChartAreas[0].AxisY.StripLines.Add(stripLine);
+
+                    double totalEfficiency = 0;
+                    int rowCount = dt.Rows.Count;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["OPERATOR_ID"].ToString();
+                        double efficiency = Convert.ToDouble(row["OPERATOR_EFFICIENCY"]);
+
+                        var pointIndex = chart2.Series["작업 공수 효율"].Points.AddXY(operatorId, efficiency);
+                        var point = chart2.Series["작업 공수 효율"].Points[pointIndex];
+                        point.MarkerSize = 10;
+
+                        if (efficiency < standard)
+                        {
+                            point.Color = Color.Red;
+                            blinkingPoints.Add(point);
+                        }
+                        else
+                        {
+                            point.Color = workingColors[colorIndex % workingColors.Length];
+                        }
+
+                        totalEfficiency += efficiency;
+
+                        colorIndex++;
+                    }
+
+                    double averageEfficiency = rowCount > 0 ? totalEfficiency / rowCount : 0;
+
+                    chart2.ChartAreas[0].AxisX.LabelStyle.Angle = 0;
+                    chart2.ChartAreas[0].AxisX.Interval = 1;
+
+                    if (blinkingPoints.Count > 0)
+                    {
+                        Timer blinkTimer = new Timer
+                        {
+                            Interval = 500
+                        };
+
+                        int blinkCount = 0;
+                        bool isRed = true;
+
+                        blinkTimer.Tick += (s, e) =>
+                        {
+                            foreach (var point in blinkingPoints)
+                            {
+                                point.Color = isRed ? Color.Transparent : Color.Red;
+                            }
+
+                            isRed = !isRed;
+                            blinkCount++;
+
+                            if (blinkCount >= 6)
+                            {
+                                blinkTimer.Stop();
+                                foreach (var point in blinkingPoints)
+                                {
+                                    point.Color = Color.Red;
+                                }
+                            }
+                        };
+
+                        blinkTimer.Start();
+                    }
+
+                    chart2.ChartAreas[0].Position = new ElementPosition(5, 18, 80, 75);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: %)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 82,
+                        Y = 85,
+                    };
+                    chart2.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "작업 공수 효율 = 표준 공수 / 작업 공수 X 100",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8),
+                        Alignment = ContentAlignment.MiddleCenter,
+                        AnchorAlignment = ContentAlignment.TopCenter,
+                        X = 22,
+                        Y = 92,
+                    };
+                    chart2.Annotations.Add(annotation1);
+
+                    if (dataGridView5.Columns.Count == 0)
+                    {
+                        dataGridView5.Columns.Add("Category", "Category");
+                        dataGridView5.Columns.Add("Value", "Value");
+                    }
+                    dataGridView5.DefaultCellStyle.Font = new Font("나눔고딕", 8, FontStyle.Regular);
+
+                    string selectedOperatorGroup = comboBox2.SelectedItem?.ToString();
+
+                    dataGridView5.Rows.Add($"{selectedOperatorGroup} 평균 작업 공수 효율", $"{averageEfficiency:F2} %");
+
+                    //dataGridView5.Columns[0].Width = 250;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart2: {ex.Message}");
+            }
+        }
+
+        // 콤보박스에 설비 그룹 로드
+        private void LoadMachineComboBox()
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = "SELECT DISTINCT LEFT(MACHINE_ID, 6) AS MachineGroup FROM machineTBL WHERE LEFT(MACHINE_ID, 6) BETWEEN 'EQ2410' AND 'EQ2459'";
+                    MySqlCommand cmd = new MySqlCommand(query, conn);
+                    MySqlDataReader reader = cmd.ExecuteReader();
+
+                    while (reader.Read())
+                    {
+                        comboBox1.Items.Add(reader["MachineGroup"].ToString());
+                    }
+                    reader.Close();
+                }
+                if (comboBox1.Items.Count > 0)
+                {
+                    comboBox1.SelectedIndex = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading ComboBox1: {ex.Message}");
+            }
+        }
+        
+        // 설비 조회 버튼
+        private void button2_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                string startDate = EQdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+                string endDate = EQdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+                RunPythonScript("date_machine_db.py", startDate, endDate);
+
+                string selectedMachineGroup = comboBox1.SelectedItem?.ToString() ?? "EQ2410";
+
+                LoadChart15(selectedMachineGroup);
+                LoadChart18(selectedMachineGroup);
+                LoadChart14(selectedMachineGroup);
+                LoadChart13(selectedMachineGroup);
+
+                MessageBox.Show("데이터가 성공적으로 새로고침되었습니다!", "새로고침 완료");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("오류 발생: " + ex.Message, "오류");
+            }
+        }
+
+        // 설비 탭 : LOSS 차트
+        private void LoadChart15(string machineGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT MACHINE_ID, MACHINE_TOTAL_WORKING_TIME, MACHINE_TOTAL_PRODUCTIVE_TIME, MACHINE_PERFORMANCE, 
+                        MACHINE_REAL_PRODUCTIVE_TIME, MACHINE_VALUE_PRODUCTIVE_TIME
+                        FROM machineTBL
+                        WHERE MACHINE_ID LIKE '{machineGroup}%'
+                        LIMIT 1";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart15.Series.Clear();
+                    chart15.Titles.Clear();
+
+                    chart15.Legends.Clear();
+                    chart15.Legends.Add(new System.Windows.Forms.DataVisualization.Charting.Legend("Default"));
+                    chart15.Legends["Default"].Docking = System.Windows.Forms.DataVisualization.Charting.Docking.Top;
+                    chart15.Legends["Default"].Alignment = System.Drawing.StringAlignment.Center;
+
+                    if (dt.Rows.Count > 0)
+                    {
+                        DataRow row = dt.Rows[0];
+
+                        string machineId = row["MACHINE_ID"].ToString();
+                        chart15.Titles.Add($"{machineId}의 LOSS 차트");
+
+                        chart15.Series.Clear();
+
+                        // chart15.Series.Add("부하 시간");
+                        // hart15.Series["부하 시간"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Bar;
+
+                        chart15.Series.Add("가동 시간");
+                        chart15.Series["가동 시간"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Bar;
+
+                        chart15.Series.Add("실가동 시간");
+                        chart15.Series["실가동 시간"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Bar;
+
+                        chart15.Series.Add("성능 가동 시간");
+                        chart15.Series["성능 가동 시간"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Bar;
+
+                        chart15.Series.Add("가치 가동 시간");
+                        chart15.Series["가치 가동 시간"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Bar;
+
+                        int workingTime = Convert.ToInt32(row["MACHINE_TOTAL_WORKING_TIME"]);
+                        int productiveTime = Convert.ToInt32(row["MACHINE_TOTAL_PRODUCTIVE_TIME"]);
+                        int realPerformance = Convert.ToInt32(row["MACHINE_REAL_PRODUCTIVE_TIME"]);
+                        int performance = Convert.ToInt32(row["MACHINE_PERFORMANCE"]);
+                        int valuePerformance = Convert.ToInt32(row["MACHINE_VALUE_PRODUCTIVE_TIME"]);
+
+                        //chart15.Series["부하 시간"].Points.AddXY(machineId, workingTime);
+                        chart15.Series["가동 시간"].Points.AddXY(machineId, productiveTime);
+                        chart15.Series["실가동 시간"].Points.AddXY(machineId, realPerformance);
+                        chart15.Series["성능 가동 시간"].Points.AddXY(machineId, performance);
+                        chart15.Series["가치 가동 시간"].Points.AddXY(machineId, valuePerformance);
+                    }
+
+                    chart15.ChartAreas[0].Position = new ElementPosition(1, 25, 95, 60);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "실가동 시간 = 완성 수 X 실제 Cycle Time\n성능 가동 시간 = 완성 수 X 표준 Cycle Time\n가치 가동 시간 = 양품 수 X 표준 Cycle Time",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 25,
+                        Y = 83,
+                    };
+                    chart15.Annotations.Add(annotation1);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 초)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 3,
+                        Y = 93,
+                    };
+                    chart15.Annotations.Add(annotation);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart15: {ex.Message}");
+            }
+        }
+
+        // 설비 탭 : 부하 시간, 가동 시간
+        private void LoadChart18(string machineGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT MACHINE_ID, MACHINE_TOTAL_WORKING_TIME, MACHINE_TOTAL_PRODUCTIVE_TIME
+                        FROM machineTBL
+                        WHERE MACHINE_ID LIKE '{machineGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart18.Series.Clear();
+                    chart18.Titles.Clear();
+                    chart18.Titles.Add("설비 ID 별로 부하 시간, 가동 시간");
+
+                    var workingTimeSeries = new Series("부하 시간")
+                    {
+                        ChartType = SeriesChartType.Column,
+                        IsVisibleInLegend = false
+                    };
+                    chart18.Series.Add(workingTimeSeries);
+
+                    var productiveTimeSeries = new Series("가동 시간")
+                    {
+                        ChartType = SeriesChartType.Column,
+                        IsVisibleInLegend = false
+                    };
+                    chart18.Series.Add(productiveTimeSeries);
+
+                    Color[] workingColors = { Color.DodgerBlue, Color.LimeGreen, Color.PaleVioletRed, Color.Salmon };
+                    Color[] productiveColors = { Color.LightBlue, Color.LightGreen, Color.Pink, Color.LightSalmon };
+
+                    int colorIndex = 0;
+                    int totalWorkingTime = 0;
+                    int totalProductiveTime = 0;
+                    int maxYValue = 0;
+                    int rowCount = dt.Rows.Count;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string machineId = row["MACHINE_ID"].ToString();
+                        int workingTime = Convert.ToInt32(row["MACHINE_TOTAL_WORKING_TIME"]);
+                        int productiveTime = Convert.ToInt32(row["MACHINE_TOTAL_PRODUCTIVE_TIME"]);
+
+                        totalWorkingTime += workingTime;
+                        totalProductiveTime += productiveTime;
+
+                        maxYValue = Math.Max(maxYValue, Math.Max(workingTime, productiveTime));
+
+                        var workingPointIndex = workingTimeSeries.Points.AddXY(machineId, workingTime);
+                        workingTimeSeries.Points[workingPointIndex].Color = workingColors[colorIndex % workingColors.Length];
+
+                        var productivePointIndex = productiveTimeSeries.Points.AddXY(machineId, productiveTime);
+                        productiveTimeSeries.Points[productivePointIndex].Color = productiveColors[colorIndex % productiveColors.Length];
+
+                        colorIndex++;
+                    }
+
+                    double averageWorkingTime = rowCount > 0 ? (double)totalWorkingTime / rowCount : 0;
+                    double averageProductiveTime = rowCount > 0 ? (double)totalProductiveTime / rowCount : 0;
+
+                    chart18.ChartAreas[0].AxisY.Minimum = 0;
+                    chart18.ChartAreas[0].AxisY.Maximum = maxYValue + (maxYValue * 0.1);
+                    chart18.ChartAreas[0].AxisY.IntervalAutoMode = IntervalAutoMode.FixedCount;
+
+                    chart18.ChartAreas[0].Position = new ElementPosition(5, 8, 85, 85);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "부하 시간  =  가동일  X  9H \n가동 시간 = 부하 시간 - 정지 시간",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 22,
+                        Y = 94,
+                    };
+                    chart18.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 초)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 95, 
+                    };
+                    chart18.Annotations.Add(annotation1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart18: {ex.Message}");
+            }
+        }
+
+        // 설비 탭 : 투입 수량, 불량 수량
+        private void LoadChart14(string machineGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT MACHINE_ID, MACHINE_TOTAL_INPUT, MACHINE_TOTAL_FAIL
+                        FROM machineTBL
+                        WHERE MACHINE_ID LIKE '{machineGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart14.Series.Clear();
+                    chart14.Legends.Clear();
+                    chart14.Titles.Clear();
+                    chart14.Titles.Add("설비 ID 별로 투입 수량, 불량 수량");
+
+                    Color[] inputColors = { Color.DodgerBlue, Color.LimeGreen, Color.PaleVioletRed, Color.Salmon };
+                    Color[] failColors = { Color.LightBlue, Color.LightGreen, Color.Pink, Color.LightSalmon };
+
+                    int colorIndex = 0;
+
+                    var inputSeries = chart14.Series.Add("투입 수량");
+                    inputSeries.ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Column;
+
+                    var failSeries = chart14.Series.Add("불량 수량");
+                    failSeries.ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Column;
+
+                    double totalFailPercentage = 0;
+                    int machineCount = 0;
+                    int maxYValue = 0;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string machineId = row["MACHINE_ID"].ToString();
+                        int totalInput = Convert.ToInt32(row["MACHINE_TOTAL_INPUT"]);
+                        int totalFail = Convert.ToInt32(row["MACHINE_TOTAL_FAIL"]);
+
+                        double failPercentage = totalInput > 0 ? ((double)totalFail / totalInput) * 100 : 0;
+
+                        maxYValue = Math.Max(maxYValue, Math.Max(totalInput, totalFail));
+
+                        var inputPointIndex = inputSeries.Points.AddXY(machineId, totalInput);
+                        inputSeries.Points[inputPointIndex].Color = inputColors[colorIndex % inputColors.Length];
+
+                        var failPointIndex = failSeries.Points.AddXY(machineId, totalFail);
+
+                        string standardQuery = $@"
+                            WITH ranked_data AS (
+                                SELECT 
+                                    ROUND(MACHINE_TOTAL_FAIL/MACHINE_TOTAL_INPUT * 100, 2) AS defectRate,
+                                    PERCENT_RANK() OVER (ORDER BY ROUND(MACHINE_TOTAL_FAIL/MACHINE_TOTAL_INPUT, 2) ASC) AS rank_value
+                                FROM machinetbl
+                                WHERE MACHINE_TOTAL_FAIL > 0 AND MACHINE_TOTAL_INPUT > 0
+                            )
+                            SELECT defectRate
+                            FROM ranked_data
+                            WHERE rank_value >= 0.7
+                            ORDER BY defectRate ASC
+                            LIMIT 1;";
+
+                        MySqlCommand standardCommand = new MySqlCommand(standardQuery, conn);
+                        var standardValue = standardCommand.ExecuteScalar();
+                        float standard = Convert.ToSingle(standardValue);
+
+                        if (failPercentage > standard)
+                        {
+                            failSeries.Points[failPointIndex].Color = Color.Red;
+                        }
+                        else
+                        {
+                            failSeries.Points[failPointIndex].Color = failColors[colorIndex % failColors.Length];
+                        }
+
+                        inputSeries.Points[inputPointIndex].ToolTip = $"{machineId}\n투입 수량: {totalInput}";
+                        failSeries.Points[failPointIndex].ToolTip = $"{machineId}\n불량 수량: {totalFail}\n불량률: {failPercentage:F2}%";
+
+                        totalFailPercentage += failPercentage;
+                        machineCount++;
+
+                        colorIndex++;
+                    }
+
+                    double averageFailPercentage = machineCount > 0 ? totalFailPercentage / machineCount : 0;
+
+                    chart14.ChartAreas[0].AxisY.Minimum = 0;
+                    chart14.ChartAreas[0].AxisY.Maximum = maxYValue + (maxYValue * 0.1);
+                    chart14.ChartAreas[0].AxisY.IntervalAutoMode = IntervalAutoMode.FixedCount;
+                    chart14.ChartAreas[0].AxisY.LabelStyle.Format = "0";
+
+                    chart14.ChartAreas[0].Position = new ElementPosition(5, 8, 85, 85);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "투입 수량 = 양품 수량 + 불량 수량 \n불량 수량 = PASS의 값이 FALSE",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 22,
+                        Y = 92,
+                    };
+                    chart14.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 개)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 95,
+                    };
+                    chart14.Annotations.Add(annotation1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart14: {ex.Message}");
+            }
+        }
+
+        // 설비 탭 : 설비 종합 효율
+        private void LoadChart13(string machineGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT MACHINE_ID, MACHINE_EFFICIENCY
+                        FROM machineTBL
+                        WHERE MACHINE_ID LIKE '{machineGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart13.Titles.Clear();
+                    chart13.Titles.Add("설비 ID 별로 설비 종합 효율");
+
+                    chart13.Series.Clear();
+                    chart13.Legends.Clear();
+
+                    var efficiencySeries = new Series("설비 종합 효율")
+                    {
+                        ChartType = SeriesChartType.Bubble
+                    };
+                    chart13.Series.Add(efficiencySeries);
+
+                    Color[] bubbleColors = { Color.DodgerBlue, Color.LimeGreen, Color.PaleVioletRed, Color.Salmon };
+                    int colorIndex = 0;
+                    List<System.Windows.Forms.DataVisualization.Charting.DataPoint> blinkingPoints = new List<System.Windows.Forms.DataVisualization.Charting.DataPoint>();
+
+                    double totalEfficiency = 0;
+                    int machineCount = 0;
+                    double maxYValue = 0;
+
+                    string standardQuery = $@"
+                        WITH ranked_data AS (
+                        SELECT 
+                            ROUND(MACHINE_EFFICIENCY, 1) AS efficiency,
+                            PERCENT_RANK() OVER (ORDER BY MACHINE_EFFICIENCY ASC) AS rank_value
+                        FROM machinetbl
+                        WHERE MACHINE_EFFICIENCY > 0
+                        )
+                        SELECT efficiency
+                        FROM ranked_data
+                        WHERE rank_value <= 0.3
+                        ORDER BY efficiency DESC
+                        LIMIT 1;";
+
+                    MySqlCommand standardCommand = new MySqlCommand(standardQuery, conn);
+                    var standardValue = standardCommand.ExecuteScalar();
+                    float standard = Convert.ToSingle(standardValue);
+
+                    chart13.ChartAreas[0].AxisY.StripLines.Clear();
+
+                    var stripLine = new StripLine
+                    {
+                        Interval = 0,
+                        IntervalOffset = standard,
+                        StripWidth = 0,
+                        BorderColor = Color.Red,
+                        BorderWidth = 2,
+                        BorderDashStyle = ChartDashStyle.Solid,
+                        Text = standard.ToString()
+                    };
+
+                    chart13.ChartAreas[0].AxisY.StripLines.Add(stripLine);
+
+                    double highestEfficiency = 0;
+                    string bestMachineId = string.Empty;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string machineId = row["MACHINE_ID"].ToString();
+                        double efficiency = Convert.ToDouble(row["MACHINE_EFFICIENCY"]);
+
+                        if (efficiency > highestEfficiency)
+                        {
+                            highestEfficiency = efficiency;
+                            bestMachineId = machineId;
+                        }
+
+                        maxYValue = Math.Max(maxYValue, efficiency);
+
+                        var pointIndex = efficiencySeries.Points.AddXY(machineId, efficiency);
+                        var point = efficiencySeries.Points[pointIndex];
+
+                        if (efficiency < standard)
+                        {
+                            point.Color = Color.Red;
+                            blinkingPoints.Add(point);
+                        }
+                        else
+                        {
+                            point.Color = bubbleColors[colorIndex % bubbleColors.Length];
+                        }
+
+                        totalEfficiency += efficiency;
+                        machineCount++;
+                        colorIndex++;
+                    }
+
+                    if (blinkingPoints.Count > 0)
+                    {
+                        Timer blinkTimer = new Timer
+                        {
+                            Interval = 500
+                        };
+
+                        int blinkCount = 0;
+                        bool isRed = true;
+
+                        blinkTimer.Tick += (s, e) =>
+                        {
+                            foreach (var point in blinkingPoints)
+                            {
+                                point.Color = isRed ? Color.Transparent : Color.Red;
+                            }
+
+                            isRed = !isRed;
+                            blinkCount++;
+
+                            if (blinkCount >= 6)
+                            {
+                                blinkTimer.Stop();
+                                foreach (var point in blinkingPoints)
+                                {
+                                    point.Color = Color.Red;
+                                }
+                            }
+                        };
+
+                        blinkTimer.Start();
+                    }
+
+                    chart13.ChartAreas[0].AxisY.Minimum = 0;
+                    chart13.ChartAreas[0].AxisY.Maximum = maxYValue + (maxYValue * 0.1);
+                    chart13.ChartAreas[0].AxisY.IntervalAutoMode = IntervalAutoMode.FixedCount;
+                    chart13.ChartAreas[0].AxisY.LabelStyle.Format = "0.0#";
+
+                    chart13.ChartAreas[0].Position = new ElementPosition(5, 8, 85, 80);
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "설비 종합 효율 = 시간 가동율  X 성능 가동율 X 양품율",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 11,
+                        Y = 92,
+                    };
+                    chart13.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: %)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 90,
+                    };
+                    chart13.Annotations.Add(annotation1);
+
+                    string defectQuery = $@"
+                        SELECT MACHINE_TOTAL_INPUT, MACHINE_TOTAL_FAIL
+                        FROM machineTBL
+                        WHERE MACHINE_ID = '{bestMachineId}'";
+
+                    MySqlCommand defectCommand = new MySqlCommand(defectQuery, conn);
+                    using (var defectReader = defectCommand.ExecuteReader())
+                    {
+                        if (defectReader.Read())
+                        {
+                            int totalInput = defectReader.GetInt32(0);
+                            int totalFail = defectReader.GetInt32(1);
+                            double defectRate = totalInput > 0 ? ((double)totalFail / totalInput) * 100 : 0;
+
+                            if (dataGridView4.Columns.Count == 0)
+                            {
+                                dataGridView4.Columns.Add("Category", "Category");
+                                dataGridView4.Columns.Add("Value", "Value");
+                            }
+
+                            dataGridView4.Rows.Add($"가장 좋은 효율을 가진 설비", $"{bestMachineId}");
+                            dataGridView4.Rows.Add($"{bestMachineId}의 설비 종합 효율", $"{highestEfficiency:F2}%");
+                            dataGridView4.Rows.Add($"{bestMachineId}의 불량률", $"{defectRate:F2}%");
+                        }
+                    }
+
+                    dataGridView4.DefaultCellStyle.Font = new Font("나눔고딕", 8, FontStyle.Regular);
+                    ConfigureDataGridView(dataGridView4);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart13: {ex.Message}");
+            }
+        }
+
+
+        // 제품 조회 버튼
+        private void button8_Click(object sender, EventArgs e)
+        {
+            try
+            {
+                string startDate = PdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+                string endDate = PdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+                RunPythonScript("date_plm_db.py", startDate, endDate);
+
+                LoadChart1("BP60010");
+                LoadDataGridView1("BP60010");
+                LoadChart3("BP60011");
+                LoadDataGridView2("BP60011");
+                LoadChart4("BP60012");
+                LoadDataGridView3("BP60012");
+
+                MessageBox.Show("데이터가 성공적으로 새로고침되었습니다!", "새로고침 완료");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("오류 발생: " + ex.Message, "오류");
+            }
+        }
+
+        // 제품 탭 : BP60010의 양품 수와 불량 수
+        private void LoadChart1(string plmGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT CODE, PLM_TOTAL_TRUE, PLM_TOTAL_FAIL
+                        FROM plmTBL
+                        WHERE CODE LIKE '{plmGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart1.Titles.Clear();
+                    chart1.Titles.Add("BP60010의 양품 수량과 불량 수량");
+
+                    chart1.Series.Clear();
+                    chart1.Series.Add("Total");
+                    chart1.Series["Total"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Pie;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["CODE"].ToString();
+                        int totalInput = Convert.ToInt32(row["PLM_TOTAL_TRUE"]);
+                        int totalFail = Convert.ToInt32(row["PLM_TOTAL_FAIL"]);
+
+                        chart1.Series["Total"].Points.AddXY($"{operatorId} 양품 수량", totalInput);
+                        chart1.Series["Total"].Points.AddXY($"{operatorId} 불량 수량", totalFail);
+                    }
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 개)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 85,
+                    };
+                    chart1.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "양품 수량 = 'PROCESS = PNT03'의 'PASS = TRUE'인 제품의 수\n불량 수량 = 'PROCESS = PNT03'의 'PASS = FALSE'인 제품의 수",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 8,
+                        Y = 92,
+                    };
+                    chart1.Annotations.Add(annotation1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart1: {ex.Message}");
+            }
+        }
+
+        // 제품 탭 : BP60010 데이터 로드
+        private void LoadDataGridView1(string plmGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT CODE, PLM_TOTAL_INPUT, PLM_TOTAL_TRUE, PLM_TOTAL_FAIL
+                        FROM plmTBL
+                        WHERE CODE LIKE '{plmGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    dataGridView1.Rows.Clear();
+                    dataGridView1.Columns.Clear();
+
+                    dataGridView1.Columns.Add("Category", "");
+                    dataGridView1.Columns.Add("Value", "");
+
+                    if (dt.Rows.Count > 0)
+                    {
+                        DataRow row = dt.Rows[0];
+
+                        int totalInput = Convert.ToInt32(row["PLM_TOTAL_INPUT"]);
+                        int totalFail = Convert.ToInt32(row["PLM_TOTAL_FAIL"]);
+
+                        double failRate = totalInput > 0 ? ((double)totalFail / totalInput) * 100 : 0;
+
+                        dataGridView1.Rows.Add("제품명", row["CODE"].ToString());
+                        dataGridView1.Rows.Add("투입 수량", totalInput.ToString() + " 개");
+                        dataGridView1.Rows.Add("양품 수량", row["PLM_TOTAL_TRUE"].ToString() + " 개");
+                        dataGridView1.Rows.Add("불량 수량", totalFail.ToString() + " 개");
+                        dataGridView1.Rows.Add("불량률", $"{failRate:F2} %");
+                    }
+
+                    dataGridView1.DefaultCellStyle.Font = new Font("나눔고딕", 9, FontStyle.Regular);
+
+                    ConfigureDataGridView(dataGridView1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading DataGridView1: {ex.Message}");
+            }
+        }
+
+        // 제품 탭 : BP60011의 양품 수와 불량 수
+        private void LoadChart3(string plmGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT CODE, PLM_TOTAL_TRUE, PLM_TOTAL_FAIL
+                        FROM plmTBL
+                        WHERE CODE LIKE '{plmGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart3.Titles.Clear();
+                    chart3.Titles.Add("BP60011의 양품 수량과 불량 수량");
+
+                    chart3.Series.Clear();
+                    chart3.Series.Add("Total");
+                    chart3.Series["Total"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Pie;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["CODE"].ToString();
+                        int totalInput = Convert.ToInt32(row["PLM_TOTAL_TRUE"]);
+                        int totalFail = Convert.ToInt32(row["PLM_TOTAL_FAIL"]);
+
+                        chart3.Series["Total"].Points.AddXY($"{operatorId} 양품 수량", totalInput);
+                        chart3.Series["Total"].Points.AddXY($"{operatorId} 불량 수량", totalFail);
+                    }
+
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 개)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 85,
+                    };
+                    chart3.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "양품 수량 = 'PROCESS = PNT03'의 'PASS = TRUE'인 제품의 수\n불량 수량 = 'PROCESS = PNT03'의 'PASS = FALSE'인 제품의 수",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 8,
+                        Y = 92,
+                    };
+                    chart3.Annotations.Add(annotation1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart1: {ex.Message}");
+            }
+        }
+
+        // 제품 탭 : BP60011 데이터 로드
+        private void LoadDataGridView2(string plmGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT CODE, PLM_TOTAL_INPUT, PLM_TOTAL_TRUE, PLM_TOTAL_FAIL
+                        FROM plmTBL
+                        WHERE CODE LIKE '{plmGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    dataGridView2.Rows.Clear();
+                    dataGridView2.Columns.Clear();
+
+                    dataGridView2.Columns.Add("Category", "");
+                    dataGridView2.Columns.Add("Value", "");
+
+                    if (dt.Rows.Count > 0)
+                    {
+                        DataRow row = dt.Rows[0];
+
+                        int totalInput = Convert.ToInt32(row["PLM_TOTAL_INPUT"]);
+                        int totalFail = Convert.ToInt32(row["PLM_TOTAL_FAIL"]);
+
+                        double failRate = totalInput > 0 ? ((double)totalFail / totalInput) * 100 : 0;
+
+                        dataGridView2.Rows.Add("제품명", row["CODE"].ToString());
+                        dataGridView2.Rows.Add("투입 수량", totalInput.ToString() + " 개");
+                        dataGridView2.Rows.Add("양품 수량", row["PLM_TOTAL_TRUE"].ToString() + " 개");
+                        dataGridView2.Rows.Add("불량 수량", totalFail.ToString() + " 개");
+                        dataGridView2.Rows.Add("불량률", $"{failRate:F2} %");
+                    }
+
+                    dataGridView2.DefaultCellStyle.Font = new Font("나눔고딕", 9, FontStyle.Regular);
+
+                    ConfigureDataGridView(dataGridView2);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading DataGridView1: {ex.Message}");
+            }
+        }
+
+        // 제품 탭 : BP60012의 양품 수와 불량 수
+        private void LoadChart4(string plmGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT CODE, PLM_TOTAL_TRUE, PLM_TOTAL_FAIL
+                        FROM plmTBL
+                        WHERE CODE LIKE '{plmGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    chart4.Titles.Clear();
+                    chart4.Titles.Add("BP60012의 양품 수량과 불량 수량");
+
+                    chart4.Series.Clear();
+                    chart4.Series.Add("Total");
+                    chart4.Series["Total"].ChartType = System.Windows.Forms.DataVisualization.Charting.SeriesChartType.Pie;
+
+                    foreach (DataRow row in dt.Rows)
+                    {
+                        string operatorId = row["CODE"].ToString();
+                        int totalInput = Convert.ToInt32(row["PLM_TOTAL_TRUE"]);
+                        int totalFail = Convert.ToInt32(row["PLM_TOTAL_FAIL"]);
+
+                        chart4.Series["Total"].Points.AddXY($"{operatorId} 양품 수량", totalInput);
+                        chart4.Series["Total"].Points.AddXY($"{operatorId} 불량 수량", totalFail);
+                    }
+                    var annotation = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "(단위: 개)",
+                        ForeColor = Color.Gray,
+                        Font = new Font("Arial", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 80,
+                        Y = 85,
+                    };
+                    chart4.Annotations.Add(annotation);
+
+                    var annotation1 = new System.Windows.Forms.DataVisualization.Charting.TextAnnotation
+                    {
+                        Text = "양품 수량 = 'PROCESS = PNT03'의 'PASS = TRUE'인 제품의 수\n불량 수량 = 'PROCESS = PNT03'의 'PASS = FALSE'인 제품의 수",
+                        ForeColor = Color.SlateGray,
+                        Font = new Font("나눔고딕", 8, FontStyle.Regular),
+                        Alignment = ContentAlignment.MiddleRight,
+                        AnchorAlignment = ContentAlignment.BottomRight,
+                        X = 8,
+                        Y = 92,
+                    };
+                    chart4.Annotations.Add(annotation1);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading chart1: {ex.Message}");
+            }
+        }
+
+        // 제품 탭 : BP60012 데이터 로드
+        private void LoadDataGridView3(string plmGroup)
+        {
+            try
+            {
+                using (MySqlConnection conn = new MySqlConnection(connectionString))
+                {
+                    conn.Open();
+                    string query = $@"
+                        SELECT CODE, PLM_TOTAL_INPUT, PLM_TOTAL_TRUE, PLM_TOTAL_FAIL
+                        FROM plmTBL
+                        WHERE CODE LIKE '{plmGroup}%'";
+
+                    MySqlDataAdapter adapter = new MySqlDataAdapter(query, conn);
+                    DataTable dt = new DataTable();
+                    adapter.Fill(dt);
+
+                    dataGridView3.Rows.Clear();
+                    dataGridView3.Columns.Clear();
+
+                    dataGridView3.Columns.Add("Category", "");
+                    dataGridView3.Columns.Add("Value", "");
+
+                    if (dt.Rows.Count > 0)
+                    {
+                        DataRow row = dt.Rows[0];
+
+                        int totalInput = Convert.ToInt32(row["PLM_TOTAL_INPUT"]);
+                        int totalFail = Convert.ToInt32(row["PLM_TOTAL_FAIL"]);
+
+                        double failRate = totalInput > 0 ? ((double)totalFail / totalInput) * 100 : 0;
+
+                        dataGridView3.Rows.Add("제품명", row["CODE"].ToString());
+                        dataGridView3.Rows.Add("투입 수량", totalInput.ToString() + " 개");
+                        dataGridView3.Rows.Add("양품 수량", row["PLM_TOTAL_TRUE"].ToString() + " 개");
+                        dataGridView3.Rows.Add("불량 수량", totalFail.ToString() + " 개");
+                        dataGridView3.Rows.Add("불량률", $"{failRate:F2} %");
+                    }
+
+                    dataGridView3.DefaultCellStyle.Font = new Font("나눔고딕", 9, FontStyle.Regular);
+
+                    ConfigureDataGridView(dataGridView3);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Error loading DataGridView1: {ex.Message}");
+            }
+        }
+
+        // 설비 콤보박스 선택 변경 이벤트
+        private void ComboBox1_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            string selectedGroup = comboBox1.SelectedItem.ToString();
+            LoadChart15(selectedGroup);
+            LoadChart18(selectedGroup);
+            LoadChart14(selectedGroup);
+            LoadChart13(selectedGroup);
+        }
+
+        // 작업자 콤보박스 선택 변경 이벤트
+        private void ComboBox2_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            string selectedGroup = comboBox2.SelectedItem.ToString();
+            LoadChart12(selectedGroup);
+            LoadChart5(selectedGroup);
+            LoadChart9(selectedGroup);
+            LoadChart2(selectedGroup);
+        }
+
+        // 타이머 이벤트 처리
+        private void timer1_Tick(object sender, EventArgs e)
+        {
+            timer1.Stop();
+            try
+            {
+                UpdateValues();
+            }
+            finally
+            {
+                timer1.Start();
+            }
+        }
+
+        // 데이터 및 차트 갱신
+        private void UpdateValues()
+        {
+            try
+            {
+                string opStartDate = OPdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+                string opEndDate = OPdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+                string eqStartDate = EQdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+                string eqEndDate = EQdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+                string plmStartDate = PdateTimePickerStart.Value.ToString("yyyy-MM-dd");
+                string plmEndDate = PdateTimePickerEnd.Value.ToString("yyyy-MM-dd");
+
+                RunPythonScript("date_operator_db.py", opStartDate, opEndDate);
+                string selectedOperatorGroup = comboBox2.SelectedItem?.ToString() ?? "OP2410";
+                LoadChart12(selectedOperatorGroup);
+                LoadChart5(selectedOperatorGroup);
+                LoadChart9(selectedOperatorGroup);
+                LoadChart2(selectedOperatorGroup);
+
+                RunPythonScript("date_machine_db.py", eqStartDate, eqEndDate);
+                string selectedMachineGroup = comboBox1.SelectedItem?.ToString() ?? "EQ2410";
+                LoadChart15(selectedMachineGroup);
+                LoadChart18(selectedMachineGroup);
+                LoadChart14(selectedMachineGroup);
+                LoadChart13(selectedMachineGroup);
+
+                RunPythonScript("date_plm_db.py", plmStartDate, plmEndDate);
+                LoadChart1("BP60010");
+                LoadDataGridView1("BP60010");
+                LoadChart3("BP60011");
+                LoadDataGridView2("BP60011");
+                LoadChart4("BP60012");
+                LoadDataGridView3("BP60012");
+
+                Console.WriteLine("데이터가 성공적으로 갱신되었습니다.");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"데이터 갱신 중 오류 발생: {ex.Message}", "오류");
+            }
+        }
+
+        // 첫 번째 탭으로 이동하는 버튼 클릭 이벤트
+        private void button3_Click(object sender, EventArgs e)
+        {
+            tabControl1.SelectedIndex = 0;
+        }
+
+        // 두 번째 탭으로 이동하는 버튼 클릭 이벤트
+        private void button4_Click(object sender, EventArgs e)
+        {
+            tabControl1.SelectedIndex = 1;
+        }
+
+        // 세 번째 탭으로 이동하는 버튼 클릭 이벤트
+        private void button5_Click(object sender, EventArgs e)
+        {
+            tabControl1.SelectedIndex = 2;
+        }
+
+        private void dataGridView1_CellContentClick(object sender, DataGridViewCellEventArgs e)
+        {
+
+        }
+
+        private void chart15_Click_1(object sender, EventArgs e)
+        {
+
+        }
+
+        private void chart9_Click(object sender, EventArgs e)
+        {
+
+        }
+
+        private void panel3_Paint(object sender, PaintEventArgs e)
+        {
+
+        }
+
+        private void EQdateTimePickerStart_ValueChanged(object sender, EventArgs e)
+        {
+            // 설비 시작 날짜
+        }
+
+        private void EQdateTimePickerEnd_ValueChanged(object sender, EventArgs e)
+        {
+            // 설비 끝 날짜
+        }
+
+        private void OPdateTimePickerStart_ValueChanged(object sender, EventArgs e)
+        {
+            // 작업자 시작 날짜
+        }
+
+        private void OPdateTimePickerEnd_ValueChanged(object sender, EventArgs e)
+        {
+            // 작업자 끝 날짜
+        }
+    }
+}
