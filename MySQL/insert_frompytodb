@@ -1,0 +1,40 @@
+import mysql.connector
+from datetime import datetime
+
+def insert_event(time, process, event_id, event_type, lot, code, serial, pass_status):
+    try:
+        conn = mysql.connector.connect(
+            host='localhost',   
+            user='root',        
+            password='1234', 
+            database='smartfactorydb'  
+        )
+        cursor = conn.cursor()
+        
+        sql = """
+        INSERT INTO eventTBL (TIME, PROCESS, ID, TYPE, LOT, CODE, SERIAL, PASS)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        values = (time, process, event_id, event_type, lot, code, serial, pass_status)
+        
+        cursor.execute(sql, values)
+        conn.commit()
+        
+        print("데이터가 성공적으로 추가되었습니다.")
+    except mysql.connector.Error as err:
+        print(f"오류: {err}")
+    finally:
+        cursor.close()
+        conn.close()
+
+time_str = input("시간을 입력하세요 (형식: YYYY-MM-DD HH:MM:SS): ")
+time = datetime.strptime(time_str, '%Y-%m-%d %H:%M:%S')
+process = input("PROCESS를 입력하세요 (최대 10자): ")
+event_id = input("ID를 입력하세요 (최대 10자): ")
+event_type = input("TYPE을 입력하세요 (형식: RUN, STOP): ")
+lot = input("LOT를 입력하세요 (최대 11자): ")
+code = input("CODE를 입력하세요 (최대 7자): ")
+serial = input("SERIAL을 입력하세요 (최대 16자): ")
+pass_status = input("PASS 상태를 입력하세요 (NULL 또는 TRUE, FALSE): ")
+
+insert_event(time, process, event_id, event_type, lot, code, serial, pass_status)
