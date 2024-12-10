@@ -1,1 +1,122 @@
+import sys
+import pymysql
+import pandas as pd
+from datetime import timedelta
 
+# 명령줄 인수로부터 시작 날짜와 종료 날짜를 가져옴
+if len(sys.argv) != 3:
+    print("Usage: python date_operator_db.py <start_date> <end_date>")
+    sys.exit(1)
+
+# 시작 날짜와 종료 날짜를 설정
+date1 = pd.to_datetime(sys.argv[1])
+date2 = pd.to_datetime(sys.argv[2])
+
+# date2에 끝 시간을 추가
+date2 = date2 + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+# # 날짜 입력
+# date1 = pd.to_datetime("2024-11-05")
+# date2 = pd.to_datetime("2024-11-07")
+
+# # date2에 끝 시간을 추가
+# date2 = date2 + pd.Timedelta(hours=23, minutes=59, seconds=59)
+
+# MySQL 데이터베이스 연결
+conn = pymysql.connect(
+    host='localhost',
+    user='root',
+    password='1234',
+    db='smartfactorydb',
+    charset='utf8'
+)
+
+# eventTBL 데이터 불러오기
+query = "SELECT * FROM eventTBL"
+data_sql = pd.read_sql(query, conn)
+
+query1 = "SELECT CODE FROM plmtbl"
+code_sql = pd.read_sql(query1, conn)
+
+# 입력받은 날짜 출력
+print(f"Start Date: {date1}")
+print(f"End Date: {date2}")
+
+data = data_sql[(data_sql['TIME'] >= date1) & (data_sql['TIME'] <= date2)]
+codes = code_sql['CODE'].tolist()
+
+# 결과를 저장할 딕셔너리
+results = {code: {
+    'input' : 0,
+    'true' : 0,
+    'false' : 0
+} for code in codes}
+
+def calculate_code_metrics(data, codes, results):
+    # CODE별 데이터 처리
+    for code in codes:
+        code_data = data[data['CODE'] == code]  # CODE별 데이터 필터링
+
+        # SERIAL별 데이터 그룹화
+        for serial, serial_data in code_data.groupby('SERIAL'):
+            # PROCESS = 'PNT03'와 TYPE = 'STOP' 조건 필터링
+            process_data = serial_data[(serial_data['PROCESS'] == 'PNT03') & (serial_data['TYPE'] == 'STOP')]
+
+            # 작업자와 설비의 PASS 상태 추출
+            operator_pass = process_data[(process_data['ID'].str.startswith('OP'))]['PASS'].tolist()
+            equipment_pass = process_data[(process_data['ID'].str.startswith('EQ'))]['PASS'].tolist()
+
+            # PASS 값이 누락된 경우 처리
+            if not operator_pass:
+                operator_pass = ['TRUE']  # 작업자가 없는 경우 'TRUE'로 간주
+            if not equipment_pass:
+                equipment_pass = ['TRUE']  # 설비가 없는 경우 'TRUE'로 간주
+
+            # 불량 조건: 작업자 PASS가 하나라도 "FALSE"이거나 설비 PASS가 하나라도 "FALSE"
+            if 'FALSE' in operator_pass or 'FALSE' in equipment_pass:
+                results[code]['false'] += 1  # 불량 수량 증가
+            else:
+                results[code]['true'] += 1  # 양품 수량 증가
+
+    # 투입 수량 계산
+    for code in codes:
+        results[code]['input'] = results[code]['true'] + results[code]['false']
+
+calculate_code_metrics(data, codes, results)
+
+# 커서 생성
+cursor = conn.cursor()
+
+# UPDATE 쿼리
+query = """
+    UPDATE plmtbl
+    SET PLM_TOTAL_INPUT = %s,
+        PLM_TOTAL_TRUE = %s,
+        PLM_TOTAL_FAIL = %s
+    WHERE CODE = %s
+"""
+
+# results 딕셔너리의 값을 plmtbl에 업데이트
+for code, data in results.items():
+    # 업데이트에 필요한 데이터를 튜플로 저장
+    values = (
+        data['input'],    # PLM_TOTAL_INPUT 값
+        data['true'],     # PLM_TOTAL_TRUE 값
+        data['false'],    # PLM_TOTAL_FAIL 값
+        code              # WHERE 절의 CODE 값
+    )
+    # 쿼리 실행
+    cursor.execute(query, values)
+
+# 변경 사항 커밋
+conn.commit()
+
+# 연결 닫기
+cursor.close()
+conn.close()
+
+print("Database update complete.")
+
+# 결과 확인
+for code, result in results.items():
+    print(f"{code}: {result}")
